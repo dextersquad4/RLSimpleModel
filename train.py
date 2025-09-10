@@ -2,6 +2,7 @@ import torch
 import math
 import random
 import model
+import torch.distributions as dist
 
 #We are using arbitrary units
 #But we are traveling at 3units/reinforcement step
@@ -9,18 +10,13 @@ SPEED = 3
 #Discount val
 DIS_VAL = 0.9
 
-if __name__ == "__main__":
-    #Initialize model
-    linearModel = model.Model()
-
-    #Initialize optimizer
-    optimzer = torch.optim.sgd(linearModel.parameters(), lr=0.01)
-
+def train_one_epoch(linearModel, optimzer):
     #Initialize the state values (floats)
-    pos = random.random() * 10.0
-    angle = 0.0
-
-    #set the model to train becuase we are adjusting the parameters to not crash
+    #pos = random.random() * 10.0
+    pos = random.uniform(3, 7)
+    angle = random.uniform(-10, 10)
+    #set the model to train bec
+    #uase we are adjusting the parameters to not crash
     linearModel.train()
 
     #Set crash variable so we can exit when crash
@@ -28,73 +24,101 @@ if __name__ == "__main__":
 
     #intilizae the arrays for each step in order to get the overall loss
     logProbArray = []
+    rwdArray = []
 
     #initialize steps to set a maximum of 100 steps where it is a success
     steps = 0
 
-    while not crashed or steps >= 100:
+    while not crashed and steps <= 100:
         #brute force just getting the logits from the tensor
-        stateTensor = torch.tensor((pos, angle))
-        outputList = linearModel(stateTensor).tolist()
-        mean = outputList[0]
-        logStd = outputList[1]
+        normailzedAngle = angle / 90
+        normailzedPos = (pos - 5.0) / 5.0
+        stateTensor = torch.tensor((normailzedPos, normailzedAngle))
+        mean, logStd = linearModel(stateTensor)
 
         #Getting the sampled value in order to get the action
-        std = pow(math.e, logStd)
-        sampledVal = random.normalvariate(mean, std)
+        logStd = logStd.clamp(-20, 2)
 
-        logP = (-1/2)*math.log10(2*math.pi)- math.log(std) - ((sampledVal - mean)**2)/(2*std**2)
+        std = torch.exp(logStd)
+        distribution = dist.Normal(mean, std)
+        valTensor = distribution.sample()
+
+        logP = distribution.log_prob(valTensor)
 
         #Get the new state given the action
-        angleChange = sampledVal * 90
+
+        sampleVal = valTensor.item()
+        angleChange = (sampleVal/3) * 45
+
 
         #Set constraints so as to not go backwards
-        if angle + angleChange >= 90:
-            angle = 90.0
-        elif angle + angleChange <= -90:
-            angle = -90.0
+        if angle + angleChange >= 45:
+            angle = 45.0
+        elif angle + angleChange <= -45:
+            angle = -45.0
         else:
             angle +=angleChange
 
         #Moniter if crash
-        pos+=math.sin(angle) * SPEED
+        pos+=math.sin(math.radians(angle)) * SPEED
 
         #Add to the arrays early so that if crash we take into account the last decision
         logProbArray.append(logP)
-
+        
+        #Add to steps
+        steps+=1
+        rwd = 0.1
         if pos >= 10:
             crashed = True
+            print("Failed at" + str(steps))
+            rwd = -10
         elif pos <= 0:
             crashed = True
-        else:
-            #Handle the non-crash scenerio
-            # This involves calculating log(sampleVal)r(t) and adding it to the total loss
-            # With r(t) = 1 when not crashing
-            steps += 1
-    
+            print("Failed at" + str(steps))
+            rwd = -10
+        if (steps == 100):
+            print("Succeed")
+            rwd = 10
+        rwdArray.append(rwd)
+
+
     #Calcualte the loss
     loss = 0
-    for i in range(steps):
+    returns = []
 
-        #calculate the discounted reward (each step has reward 1)
-        discountedReward = 0
-        for j in range(i, steps):
-            discountedReward+=pow(DIS_VAL, j-i)
-        #increase loss by -logp*reward
-        loss+=logProbArray[i]*discountedReward
+    G_t = 0
 
-    #mean loss
-    meanLoss = loss/steps
+    for r in reversed(rwdArray):
+        G_t = r + G_t * DIS_VAL
+        returns.insert(0, G_t)
+
+    returns = torch.tensor(returns)
+
+    #normalize ????
+    if len(returns) > 1:
+        returns = (returns - returns.mean()) / (returns.std() + 1e-9)
+
+    for logP, ret in zip(logProbArray, returns):
+        loss += -1 * logP * ret
 
     #Clear the optimzer 
     optimzer.zero_grad()
 
     #Idk if that works
-    meanLoss.backward()
+    loss.backward()
 
     #Just apply the shit
     optimzer.step()
 
+if __name__ == "__main__":
+    #Initialize model
+    linearModel = model.Model()
+
+    #Initialize optimizer
+    optimizer = torch.optim.Adam(linearModel.parameters(), lr=0.001)
+
+    for i in range(100):
+        train_one_epoch(linearModel, optimizer)
 
 
 
